@@ -75,6 +75,10 @@ Create part payload:
 - `PUT /bom/links`
 - `DELETE /bom/links/:parentId/:childId`
 
+Important:
+- `DELETE /bom/links/:parentId/:childId` is a delete endpoint.
+- Opening that URL in a browser sends `GET`, so it will not delete the link.
+
 Create BOM link payload:
 ```json
 {
