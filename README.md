@@ -11,7 +11,7 @@ NestJS backend for managing parts, BOM links, and audit logs.
 ## Tech stack
 - NestJS 11
 - TypeScript
-- In-memory data store (no database yet)
+- SQLite (`better-sqlite3`)
 
 ## Run locally
 
@@ -28,6 +28,11 @@ pnpm run start:dev
 Server runs on:
 - `http://localhost:3000` (default)
 - Use `PORT` env var to change it.
+
+Database settings:
+- `DATABASE_PATH` (optional): SQLite file path
+  - Default: `./data/part-bom.sqlite`
+- `SEED_SAMPLE_DATA` (optional): set `false` to disable startup seed
 
 ### 3) Health check
 ```http
@@ -96,9 +101,9 @@ Update BOM link payload:
 - Max BOM node limit: `80`
 
 ## Data behavior
-- Data is stored in memory.
-- Data resets every time the backend restarts.
-- Seeded dataset includes sample assembly tree (root part: `Autonomous Cart Assembly`).
+- Data is persisted in SQLite.
+- Default DB file: `backend/data/part-bom.sqlite`.
+- Seeded dataset is inserted only when DB is empty (root part: `Autonomous Cart Assembly`).
 
 ## Useful scripts
 - `pnpm run start` - run app
@@ -109,4 +114,4 @@ Update BOM link payload:
 - `pnpm run test:e2e` - end-to-end tests
 
 ## Quick explanation
-"This backend is a lightweight BOM API built with NestJS. It manages parts, BOM relationships, and audit logs while enforcing core BOM rules such as no cycles and valid quantities. It uses in-memory seeded data, so it is easy to run and demo locally."
+"This backend is a lightweight BOM API built with NestJS. It manages parts, BOM relationships, and audit logs while enforcing core BOM rules such as no cycles and valid quantities. Data is persisted in SQLite with optional startup seed data."

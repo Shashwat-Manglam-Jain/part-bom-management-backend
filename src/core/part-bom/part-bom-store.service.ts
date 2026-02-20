@@ -2,7 +2,11 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  OnModuleDestroy,
 } from '@nestjs/common';
+import { mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import BetterSqlite3 from 'better-sqlite3';
 import {
   AuditAction,
   AuditLog,
@@ -40,26 +44,70 @@ interface UpdateBomLinkInput {
   quantity: number;
 }
 
+interface PartRow {
+  id: string;
+  part_number: string;
+  name: string;
+  description: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface BomLinkRow {
+  parentId: string;
+  childId: string;
+  quantity: number;
+  createdAt: string;
+}
+
+interface AuditLogRow {
+  id: string;
+  partId: string;
+  action: AuditAction;
+  message: string;
+  timestamp: string;
+  metadata: string | null;
+}
+
 @Injectable()
-export class PartBomStoreService {
+export class PartBomStoreService implements OnModuleDestroy {
   readonly maxExpandDepth = 5;
   readonly maxExpandNodeLimit = 80;
 
-  private readonly partsById = new Map<string, Part>();
-  private readonly partIdByPartNumber = new Map<string, string>();
-  private readonly childLinksByParentId = new Map<
-    string,
-    Map<string, BomLink>
-  >();
-  private readonly parentIdsByChildId = new Map<string, Set<string>>();
-  private readonly auditLogsByPartId = new Map<string, AuditLog[]>();
+  private readonly db: BetterSqlite3.Database;
 
   private partIdSequence = 1;
   private auditLogSequence = 1;
   private partNumberSequence = 1;
 
   constructor() {
-    this.seedSampleData();
+    const dbPath =
+      process.env.DATABASE_PATH?.trim() ||
+      join(process.cwd(), 'data', 'part-bom.sqlite');
+
+    if (dbPath !== ':memory:') {
+      mkdirSync(dirname(dbPath), { recursive: true });
+    }
+
+    this.db = new BetterSqlite3(dbPath);
+    this.db.pragma('foreign_keys = ON');
+
+    if (dbPath !== ':memory:') {
+      this.db.pragma('journal_mode = WAL');
+    }
+
+    this.initializeSchema();
+    this.initializeSequences();
+
+    const shouldSeed =
+      (process.env.SEED_SAMPLE_DATA ?? 'true').toLowerCase() !== 'false';
+    if (shouldSeed && this.getPartsCount() === 0) {
+      this.seedSampleData();
+    }
+  }
+
+  onModuleDestroy() {
+    this.db.close();
   }
 
   createPart(input: CreatePartInput): Part {
@@ -86,18 +134,38 @@ export class PartBomStoreService {
       updatedAt: now,
     };
 
-    this.partsById.set(part.id, part);
-    this.partIdByPartNumber.set(part.partNumber, part.id);
-    this.updatePartNumberSequence(part.partNumber);
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO parts (
+            id,
+            part_number,
+            name,
+            description,
+            created_at,
+            updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          part.id,
+          part.partNumber,
+          part.name,
+          part.description,
+          part.createdAt,
+          part.updatedAt,
+        );
 
-    this.writeAudit(
-      part.id,
-      'PART_CREATED',
-      `Part ${part.partNumber} was created.`,
-      {
-        name: part.name,
-      },
-    );
+      this.updatePartNumberSequence(part.partNumber);
+
+      this.writeAudit(
+        part.id,
+        'PART_CREATED',
+        `Part ${part.partNumber} was created.`,
+        {
+          name: part.name,
+        },
+      );
+    })();
 
     return { ...part };
   }
@@ -126,8 +194,6 @@ export class PartBomStoreService {
 
       if (normalizedPartNumber !== part.partNumber) {
         this.assertPartNumberIsAvailable(normalizedPartNumber);
-        this.partIdByPartNumber.delete(part.partNumber);
-        this.partIdByPartNumber.set(normalizedPartNumber, part.id);
         this.updatePartNumberSequence(normalizedPartNumber);
       }
 
@@ -142,16 +208,33 @@ export class PartBomStoreService {
       updatedAt: this.getTimestamp(),
     };
 
-    this.partsById.set(partId, updatedPart);
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE parts
+            SET part_number = ?,
+                name = ?,
+                description = ?,
+                updated_at = ?
+          WHERE id = ?`,
+        )
+        .run(
+          updatedPart.partNumber,
+          updatedPart.name,
+          updatedPart.description,
+          updatedPart.updatedAt,
+          partId,
+        );
 
-    this.writeAudit(
-      partId,
-      'PART_UPDATED',
-      `Part ${updatedPart.partNumber} was updated.`,
-      {
-        name: updatedPart.name,
-      },
-    );
+      this.writeAudit(
+        partId,
+        'PART_UPDATED',
+        `Part ${updatedPart.partNumber} was updated.`,
+        {
+          name: updatedPart.name,
+        },
+      );
+    })();
 
     return { ...updatedPart };
   }
@@ -161,40 +244,65 @@ export class PartBomStoreService {
     const byName = filters.name?.trim().toLowerCase();
     const byAny = filters.q?.trim().toLowerCase();
 
-    return [...this.partsById.values()]
-      .filter((part) => {
-        const numberMatch =
-          !byPartNumber || part.partNumber.toLowerCase().includes(byPartNumber);
-        const nameMatch = !byName || part.name.toLowerCase().includes(byName);
-        const anyMatch =
-          !byAny ||
-          part.name.toLowerCase().includes(byAny) ||
-          part.partNumber.toLowerCase().includes(byAny);
+    const whereClauses: string[] = [];
+    const params: string[] = [];
 
-        return numberMatch && nameMatch && anyMatch;
-      })
-      .sort((left, right) => left.partNumber.localeCompare(right.partNumber))
-      .map((part) => this.toPartSummary(part));
+    if (byPartNumber) {
+      whereClauses.push('LOWER(part_number) LIKE ?');
+      params.push(`%${byPartNumber}%`);
+    }
+
+    if (byName) {
+      whereClauses.push('LOWER(name) LIKE ?');
+      params.push(`%${byName}%`);
+    }
+
+    if (byAny) {
+      whereClauses.push('(LOWER(name) LIKE ? OR LOWER(part_number) LIKE ?)');
+      params.push(`%${byAny}%`, `%${byAny}%`);
+    }
+
+    const whereQuery =
+      whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+    const rows = this.db
+      .prepare(
+        `SELECT id, part_number AS partNumber, name
+         FROM parts
+         ${whereQuery}
+         ORDER BY part_number ASC`,
+      )
+      .all(...params) as PartSummary[];
+
+    return rows.map((row) => ({
+      id: row.id,
+      partNumber: row.partNumber,
+      name: row.name,
+    }));
   }
 
   getPartDetails(partId: string): PartDetails {
     const part = this.requirePart(partId);
 
-    const parentParts = this.getParentIds(partId)
-      .map((parentId) => this.toPartSummary(this.requirePart(parentId)))
-      .sort((left, right) => left.partNumber.localeCompare(right.partNumber));
+    const parentParts = this.db
+      .prepare(
+        `SELECT p.id, p.part_number AS partNumber, p.name
+         FROM bom_links bl
+         INNER JOIN parts p ON p.id = bl.parent_id
+         WHERE bl.child_id = ?
+         ORDER BY p.part_number ASC`,
+      )
+      .all(partId) as PartSummary[];
 
-    const childParts = this.getChildLinks(partId)
-      .map((link) => {
-        const childPart = this.requirePart(link.childId);
-        const childUsage: ChildPartUsage = {
-          ...this.toPartSummary(childPart),
-          quantity: link.quantity,
-        };
-
-        return childUsage;
-      })
-      .sort((left, right) => left.partNumber.localeCompare(right.partNumber));
+    const childParts = this.db
+      .prepare(
+        `SELECT p.id, p.part_number AS partNumber, p.name, bl.quantity
+         FROM bom_links bl
+         INNER JOIN parts p ON p.id = bl.child_id
+         WHERE bl.parent_id = ?
+         ORDER BY p.part_number ASC`,
+      )
+      .all(partId) as ChildPartUsage[];
 
     return {
       ...part,
@@ -208,10 +316,31 @@ export class PartBomStoreService {
   getPartAuditLogs(partId: string): AuditLog[] {
     this.requirePart(partId);
 
-    const logs = this.auditLogsByPartId.get(partId) ?? [];
-    return [...logs].sort((left, right) =>
-      right.timestamp.localeCompare(left.timestamp),
-    );
+    const rows = this.db
+      .prepare(
+        `SELECT
+          id,
+          part_id AS partId,
+          action,
+          message,
+          timestamp,
+          metadata
+         FROM audit_logs
+         WHERE part_id = ?
+         ORDER BY timestamp DESC`,
+      )
+      .all(partId) as AuditLogRow[];
+
+    return rows.map((row) => ({
+      id: row.id,
+      partId: row.partId,
+      action: row.action,
+      message: row.message,
+      timestamp: row.timestamp,
+      metadata: row.metadata
+        ? (JSON.parse(row.metadata) as Record<string, string | number>)
+        : undefined,
+    }));
   }
 
   createBomLink(input: CreateBomLinkInput): BomLink {
@@ -229,8 +358,13 @@ export class PartBomStoreService {
       throw new BadRequestException('BOM quantity must be a positive integer.');
     }
 
-    const parentLinks = this.getOrCreateChildLinkMap(parent.id);
-    if (parentLinks.has(child.id)) {
+    const existing = this.db
+      .prepare(
+        'SELECT 1 AS found FROM bom_links WHERE parent_id = ? AND child_id = ?',
+      )
+      .get(parent.id, child.id) as { found: number } | undefined;
+
+    if (existing) {
       throw new BadRequestException(
         `BOM link already exists between ${parent.partNumber} and ${child.partNumber}.`,
       );
@@ -249,32 +383,34 @@ export class PartBomStoreService {
       createdAt: this.getTimestamp(),
     };
 
-    parentLinks.set(child.id, link);
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO bom_links (parent_id, child_id, quantity, created_at)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run(link.parentId, link.childId, link.quantity, link.createdAt);
 
-    const parentIds =
-      this.parentIdsByChildId.get(child.id) ?? new Set<string>();
-    parentIds.add(parent.id);
-    this.parentIdsByChildId.set(child.id, parentIds);
+      this.writeAudit(
+        parent.id,
+        'BOM_LINK_CREATED',
+        `Linked child ${child.partNumber} to ${parent.partNumber}.`,
+        {
+          childId: child.id,
+          quantity,
+        },
+      );
 
-    this.writeAudit(
-      parent.id,
-      'BOM_LINK_CREATED',
-      `Linked child ${child.partNumber} to ${parent.partNumber}.`,
-      {
-        childId: child.id,
-        quantity,
-      },
-    );
-
-    this.writeAudit(
-      child.id,
-      'BOM_LINK_CREATED',
-      `Linked as child of ${parent.partNumber}.`,
-      {
-        parentId: parent.id,
-        quantity,
-      },
-    );
+      this.writeAudit(
+        child.id,
+        'BOM_LINK_CREATED',
+        `Linked as child of ${parent.partNumber}.`,
+        {
+          parentId: parent.id,
+          quantity,
+        },
+      );
+    })();
 
     return { ...link };
   }
@@ -287,14 +423,14 @@ export class PartBomStoreService {
       throw new BadRequestException('BOM quantity must be a positive integer.');
     }
 
-    const parentLinks = this.childLinksByParentId.get(parent.id);
-    if (!parentLinks) {
-      throw new NotFoundException(
-        `No BOM link exists between ${parent.partNumber} and ${child.partNumber}.`,
-      );
-    }
+    const existingLink = this.db
+      .prepare(
+        `SELECT created_at AS createdAt
+         FROM bom_links
+         WHERE parent_id = ? AND child_id = ?`,
+      )
+      .get(parent.id, child.id) as { createdAt: string } | undefined;
 
-    const existingLink = parentLinks.get(child.id);
     if (!existingLink) {
       throw new NotFoundException(
         `No BOM link exists between ${parent.partNumber} and ${child.partNumber}.`,
@@ -302,31 +438,41 @@ export class PartBomStoreService {
     }
 
     const updatedLink: BomLink = {
-      ...existingLink,
+      parentId: parent.id,
+      childId: child.id,
       quantity: input.quantity,
+      createdAt: existingLink.createdAt,
     };
 
-    parentLinks.set(child.id, updatedLink);
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE bom_links
+           SET quantity = ?
+           WHERE parent_id = ? AND child_id = ?`,
+        )
+        .run(input.quantity, parent.id, child.id);
 
-    this.writeAudit(
-      parent.id,
-      'BOM_LINK_UPDATED',
-      `Updated quantity for child ${child.partNumber} in ${parent.partNumber}.`,
-      {
-        childId: child.id,
-        quantity: input.quantity,
-      },
-    );
+      this.writeAudit(
+        parent.id,
+        'BOM_LINK_UPDATED',
+        `Updated quantity for child ${child.partNumber} in ${parent.partNumber}.`,
+        {
+          childId: child.id,
+          quantity: input.quantity,
+        },
+      );
 
-    this.writeAudit(
-      child.id,
-      'BOM_LINK_UPDATED',
-      `Updated quantity in parent ${parent.partNumber}.`,
-      {
-        parentId: parent.id,
-        quantity: input.quantity,
-      },
-    );
+      this.writeAudit(
+        child.id,
+        'BOM_LINK_UPDATED',
+        `Updated quantity in parent ${parent.partNumber}.`,
+        {
+          parentId: parent.id,
+          quantity: input.quantity,
+        },
+      );
+    })();
 
     return { ...updatedLink };
   }
@@ -335,43 +481,41 @@ export class PartBomStoreService {
     const parent = this.requirePart(parentId);
     const child = this.requirePart(childId);
 
-    const parentLinks = this.childLinksByParentId.get(parent.id);
-    if (!parentLinks || !parentLinks.has(child.id)) {
+    const link = this.db
+      .prepare(
+        'SELECT 1 AS found FROM bom_links WHERE parent_id = ? AND child_id = ?',
+      )
+      .get(parent.id, child.id) as { found: number } | undefined;
+
+    if (!link) {
       throw new NotFoundException(
         `No BOM link exists between ${parent.partNumber} and ${child.partNumber}.`,
       );
     }
 
-    parentLinks.delete(child.id);
-    if (parentLinks.size === 0) {
-      this.childLinksByParentId.delete(parent.id);
-    }
+    this.db.transaction(() => {
+      this.db
+        .prepare('DELETE FROM bom_links WHERE parent_id = ? AND child_id = ?')
+        .run(parent.id, child.id);
 
-    const parentIds = this.parentIdsByChildId.get(child.id);
-    if (parentIds) {
-      parentIds.delete(parent.id);
-      if (parentIds.size === 0) {
-        this.parentIdsByChildId.delete(child.id);
-      }
-    }
+      this.writeAudit(
+        parent.id,
+        'BOM_LINK_REMOVED',
+        `Removed child ${child.partNumber} from ${parent.partNumber}.`,
+        {
+          childId: child.id,
+        },
+      );
 
-    this.writeAudit(
-      parent.id,
-      'BOM_LINK_REMOVED',
-      `Removed child ${child.partNumber} from ${parent.partNumber}.`,
-      {
-        childId: child.id,
-      },
-    );
-
-    this.writeAudit(
-      child.id,
-      'BOM_LINK_REMOVED',
-      `Removed parent ${parent.partNumber}.`,
-      {
-        parentId: parent.id,
-      },
-    );
+      this.writeAudit(
+        child.id,
+        'BOM_LINK_REMOVED',
+        `Removed parent ${parent.partNumber}.`,
+        {
+          parentId: parent.id,
+        },
+      );
+    })();
   }
 
   getBomTree(
@@ -461,28 +605,42 @@ export class PartBomStoreService {
   }
 
   private requirePart(partId: string): Part {
-    const part = this.partsById.get(partId);
-    if (!part) {
+    const row = this.db
+      .prepare(
+        `SELECT id, part_number, name, description, created_at, updated_at
+         FROM parts
+         WHERE id = ?`,
+      )
+      .get(partId) as PartRow | undefined;
+
+    if (!row) {
       throw new NotFoundException(`Part '${partId}' was not found.`);
     }
 
-    return part;
+    return this.toPart(row);
   }
 
   private getChildLinks(parentId: string): BomLink[] {
-    const links = [
-      ...(this.childLinksByParentId.get(parentId)?.values() ?? []),
-    ];
+    const rows = this.db
+      .prepare(
+        `SELECT
+          bl.parent_id AS parentId,
+          bl.child_id AS childId,
+          bl.quantity,
+          bl.created_at AS createdAt
+         FROM bom_links bl
+         INNER JOIN parts p ON p.id = bl.child_id
+         WHERE bl.parent_id = ?
+         ORDER BY p.part_number ASC`,
+      )
+      .all(parentId) as BomLinkRow[];
 
-    return links.sort((left, right) => {
-      const leftPart = this.requirePart(left.childId);
-      const rightPart = this.requirePart(right.childId);
-      return leftPart.partNumber.localeCompare(rightPart.partNumber);
-    });
-  }
-
-  private getParentIds(childId: string): string[] {
-    return [...(this.parentIdsByChildId.get(childId) ?? [])];
+    return rows.map((row) => ({
+      parentId: row.parentId,
+      childId: row.childId,
+      quantity: row.quantity,
+      createdAt: row.createdAt,
+    }));
   }
 
   private toPartSummary(part: Part): PartSummary {
@@ -491,17 +649,6 @@ export class PartBomStoreService {
       partNumber: part.partNumber,
       name: part.name,
     };
-  }
-
-  private getOrCreateChildLinkMap(parentId: string): Map<string, BomLink> {
-    const existing = this.childLinksByParentId.get(parentId);
-    if (existing) {
-      return existing;
-    }
-
-    const next = new Map<string, BomLink>();
-    this.childLinksByParentId.set(parentId, next);
-    return next;
   }
 
   private allocatePartId(): string {
@@ -521,14 +668,22 @@ export class PartBomStoreService {
       const candidate = `PRT-${String(this.partNumberSequence).padStart(6, '0')}`;
       this.partNumberSequence += 1;
 
-      if (!this.partIdByPartNumber.has(candidate)) {
+      const existing = this.db
+        .prepare('SELECT id FROM parts WHERE part_number = ?')
+        .get(candidate) as { id: string } | undefined;
+
+      if (!existing) {
         return candidate;
       }
     }
   }
 
   private assertPartNumberIsAvailable(partNumber: string): void {
-    if (this.partIdByPartNumber.has(partNumber)) {
+    const existing = this.db
+      .prepare('SELECT id FROM parts WHERE part_number = ?')
+      .get(partNumber) as { id: string } | undefined;
+
+    if (existing) {
       throw new BadRequestException(
         `Part number '${partNumber}' already exists.`,
       );
@@ -572,13 +727,14 @@ export class PartBomStoreService {
 
       visited.add(partId);
 
-      const childLinks = this.childLinksByParentId.get(partId);
-      if (!childLinks) {
-        continue;
-      }
+      const childRows = this.db
+        .prepare(
+          'SELECT child_id AS childId FROM bom_links WHERE parent_id = ?',
+        )
+        .all(partId) as Array<{ childId: string }>;
 
-      for (const childId of childLinks.keys()) {
-        stack.push(childId);
+      for (const row of childRows) {
+        stack.push(row.childId);
       }
     }
 
@@ -600,9 +756,121 @@ export class PartBomStoreService {
       metadata,
     };
 
-    const existingLogs = this.auditLogsByPartId.get(partId) ?? [];
-    existingLogs.push(log);
-    this.auditLogsByPartId.set(partId, existingLogs);
+    this.db
+      .prepare(
+        `INSERT INTO audit_logs (id, part_id, action, message, timestamp, metadata)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        log.id,
+        log.partId,
+        log.action,
+        log.message,
+        log.timestamp,
+        log.metadata ? JSON.stringify(log.metadata) : null,
+      );
+  }
+
+  private initializeSchema(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS parts (
+        id TEXT PRIMARY KEY,
+        part_number TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS bom_links (
+        parent_id TEXT NOT NULL,
+        child_id TEXT NOT NULL,
+        quantity INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (parent_id, child_id),
+        FOREIGN KEY (parent_id) REFERENCES parts(id) ON DELETE CASCADE,
+        FOREIGN KEY (child_id) REFERENCES parts(id) ON DELETE CASCADE,
+        CHECK (quantity > 0)
+      );
+
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id TEXT PRIMARY KEY,
+        part_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        message TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        metadata TEXT,
+        FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_parts_part_number ON parts(part_number);
+      CREATE INDEX IF NOT EXISTS idx_bom_links_parent ON bom_links(parent_id);
+      CREATE INDEX IF NOT EXISTS idx_bom_links_child ON bom_links(child_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_part_timestamp ON audit_logs(part_id, timestamp DESC);
+    `);
+  }
+
+  private initializeSequences(): void {
+    const partRows = this.db.prepare('SELECT id FROM parts').all() as Array<{
+      id: string;
+    }>;
+    const auditRows = this.db
+      .prepare('SELECT id FROM audit_logs')
+      .all() as Array<{ id: string }>;
+    const partNumberRows = this.db
+      .prepare('SELECT part_number AS partNumber FROM parts')
+      .all() as Array<{ partNumber: string }>;
+
+    this.partIdSequence = this.resolveNextSequence(
+      partRows.map((row) => row.id),
+      /^PART-(\d+)$/,
+    );
+    this.auditLogSequence = this.resolveNextSequence(
+      auditRows.map((row) => row.id),
+      /^AUD-(\d+)$/,
+    );
+    this.partNumberSequence = this.resolveNextSequence(
+      partNumberRows.map((row) => row.partNumber),
+      /^PRT-(\d+)$/,
+    );
+  }
+
+  private resolveNextSequence(values: string[], pattern: RegExp): number {
+    let max = 0;
+
+    for (const value of values) {
+      const matches = pattern.exec(value);
+      if (!matches) {
+        continue;
+      }
+
+      const parsed = Number.parseInt(matches[1], 10);
+      if (!Number.isNaN(parsed)) {
+        max = Math.max(max, parsed);
+      }
+    }
+
+    return max + 1;
+  }
+
+  private getPartsCount(): number {
+    const row = this.db
+      .prepare('SELECT COUNT(*) AS count FROM parts')
+      .get() as {
+      count: number;
+    };
+    return row.count;
+  }
+
+  private toPart(row: PartRow): Part {
+    return {
+      id: row.id,
+      partNumber: row.part_number,
+      name: row.name,
+      description: row.description,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
   }
 
   private seedSampleData(): void {
