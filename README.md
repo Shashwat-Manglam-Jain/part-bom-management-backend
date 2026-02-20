@@ -1,98 +1,112 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Backend - Part BOM Management API
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+NestJS backend for managing parts, BOM links, and audit logs.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## What this backend does
+- Provides REST APIs for parts and BOM.
+- Prevents invalid BOM links (self-link, duplicate link, cycle).
+- Tracks audit logs for part and BOM changes.
+- Starts with seeded sample data for quick local demo.
 
-## Description
+## Tech stack
+- NestJS 11
+- TypeScript
+- In-memory data store (no database yet)
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Run locally
 
-## Project setup
-
+### 1) Install dependencies
 ```bash
-$ pnpm install
+pnpm install
 ```
 
-## Compile and run the project
-
+### 2) Start server (dev)
 ```bash
-# development
-$ pnpm run start
-
-# watch mode
-$ pnpm run start:dev
-
-# production mode
-$ pnpm run start:prod
+pnpm run start:dev
 ```
 
-## Run tests
+Server runs on:
+- `http://localhost:3000` (default)
+- Use `PORT` env var to change it.
 
-```bash
-# unit tests
-$ pnpm run test
-
-# e2e tests
-$ pnpm run test:e2e
-
-# test coverage
-$ pnpm run test:cov
+### 3) Health check
+```http
+GET /health
+```
+Response:
+```json
+{
+  "status": "ok",
+  "service": "part-bom-management"
+}
 ```
 
-## Deployment
+## API overview
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+### Parts
+- `GET /parts?q=searchText`
+- `GET /parts?partNumber=PRT-000001`
+- `GET /parts?name=controller`
+- `POST /parts`
+- `PUT /parts/:partId`
+- `GET /parts/:partId`
+- `GET /parts/:partId/audit-logs`
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ pnpm install -g @nestjs/mau
-$ mau deploy
+Create part payload:
+```json
+{
+  "name": "Motor Controller",
+  "partNumber": "PRT-009999",
+  "description": "Optional description"
+}
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+### BOM
+- `GET /bom/:rootPartId?depth=1&nodeLimit=80`
+- `POST /bom/links`
+- `PUT /bom/links`
+- `DELETE /bom/links/:parentId/:childId`
 
-## Resources
+Create BOM link payload:
+```json
+{
+  "parentId": "PART-0001",
+  "childId": "PART-0002",
+  "quantity": 2
+}
+```
 
-Check out a few resources that may come in handy when working with NestJS:
+Update BOM link payload:
+```json
+{
+  "parentId": "PART-0001",
+  "childId": "PART-0002",
+  "quantity": 5
+}
+```
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+## Rules and limits
+- Part name is required.
+- Part number (if sent) must be unique.
+- Auto-generated part numbers use format: `PRT-000001`.
+- BOM quantity must be a positive integer.
+- BOM cannot link a part to itself.
+- BOM cannot create cycles.
+- Max BOM expansion depth: `5`
+- Max BOM node limit: `80`
 
-## Support
+## Data behavior
+- Data is stored in memory.
+- Data resets every time the backend restarts.
+- Seeded dataset includes sample assembly tree (root part: `Autonomous Cart Assembly`).
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+## Useful scripts
+- `pnpm run start` - run app
+- `pnpm run start:dev` - run with watch mode
+- `pnpm run build` - build TypeScript
+- `pnpm run lint` - lint code
+- `pnpm run test` - unit tests
+- `pnpm run test:e2e` - end-to-end tests
 
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+## Quick explanation
+"This backend is a lightweight BOM API built with NestJS. It manages parts, BOM relationships, and audit logs while enforcing core BOM rules such as no cycles and valid quantities. It uses in-memory seeded data, so it is easy to run and demo locally."
