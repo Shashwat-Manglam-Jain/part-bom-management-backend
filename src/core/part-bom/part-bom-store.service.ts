@@ -81,9 +81,11 @@ export class PartBomStoreService implements OnModuleDestroy {
   private partNumberSequence = 1;
 
   constructor() {
-    const dbPath =
-      process.env.DATABASE_PATH?.trim() ||
-      join(process.cwd(), 'data', 'part-bom.sqlite');
+    const isVercel = process.env.VERCEL === '1';
+    const defaultDatabasePath = isVercel
+      ? '/tmp/part-bom.sqlite'
+      : join(process.cwd(), 'data', 'part-bom.sqlite');
+    const dbPath = process.env.DATABASE_PATH?.trim() || defaultDatabasePath;
 
     if (dbPath !== ':memory:') {
       mkdirSync(dirname(dbPath), { recursive: true });
@@ -92,7 +94,7 @@ export class PartBomStoreService implements OnModuleDestroy {
     this.db = new BetterSqlite3(dbPath);
     this.db.pragma('foreign_keys = ON');
 
-    if (dbPath !== ':memory:') {
+    if (dbPath !== ':memory:' && !isVercel) {
       this.db.pragma('journal_mode = WAL');
     }
 

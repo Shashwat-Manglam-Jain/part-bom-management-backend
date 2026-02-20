@@ -12,6 +12,7 @@ NestJS backend for managing parts, BOM links, and audit logs.
 - NestJS 11
 - TypeScript
 - SQLite (`better-sqlite3`)
+- Node.js 20.x
 
 ## Run locally
 
@@ -31,7 +32,8 @@ Server runs on:
 
 Database settings:
 - `DATABASE_PATH` (optional): SQLite file path
-  - Default: `./data/part-bom.sqlite`
+  - Local default: `./data/part-bom.sqlite`
+  - Vercel default: `/tmp/part-bom.sqlite`
 - `SEED_SAMPLE_DATA` (optional): set `false` to disable startup seed
 
 ### 3) Health check
@@ -104,6 +106,21 @@ Update BOM link payload:
 - Data is persisted in SQLite.
 - Default DB file: `backend/data/part-bom.sqlite`.
 - Seeded dataset is inserted only when DB is empty (root part: `Autonomous Cart Assembly`).
+- On Vercel, SQLite file is stored in `/tmp`, so data is ephemeral per serverless instance.
+
+## Deploy to Vercel (backend)
+1. Import this repo in Vercel.
+2. Set project **Root Directory** to `backend`.
+3. Keep build command default (`pnpm run build`).
+4. Set Node.js version to `20.x` in Vercel project settings.
+5. Add environment variables:
+   - `SEED_SAMPLE_DATA=true` (or `false` if you do not want seed data)
+   - `DATABASE_PATH=/tmp/part-bom.sqlite` (recommended on Vercel)
+6. Deploy.
+
+Notes:
+- Vercel serverless filesystem is ephemeral. SQLite data will not be permanently stored.
+- For permanent production data, use a managed database (PostgreSQL/MySQL).
 
 ## Useful scripts
 - `pnpm run start` - run app
