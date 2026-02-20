@@ -34,6 +34,7 @@ Database settings:
 - `DATABASE_PATH` (optional): SQLite file path
   - Local default: `./data/part-bom.sqlite`
   - Vercel default: `/tmp/part-bom.sqlite`
+  - On Vercel, non-`/tmp` paths are ignored and fallback to `/tmp/part-bom.sqlite`
 - `SEED_SAMPLE_DATA` (optional): set `false` to disable startup seed
 
 ### 3) Health check

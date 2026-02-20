@@ -82,10 +82,24 @@ export class PartBomStoreService implements OnModuleDestroy {
 
   constructor() {
     const isVercel = process.env.VERCEL === '1';
-    const defaultDatabasePath = isVercel
-      ? '/tmp/part-bom.sqlite'
-      : join(process.cwd(), 'data', 'part-bom.sqlite');
-    const dbPath = process.env.DATABASE_PATH?.trim() || defaultDatabasePath;
+    const configuredDatabasePath = process.env.DATABASE_PATH?.trim();
+    const localDefaultDatabasePath = join(
+      process.cwd(),
+      'data',
+      'part-bom.sqlite',
+    );
+
+    let dbPath = configuredDatabasePath || localDefaultDatabasePath;
+    if (isVercel) {
+      if (
+        configuredDatabasePath === ':memory:' ||
+        configuredDatabasePath?.startsWith('/tmp/')
+      ) {
+        dbPath = configuredDatabasePath;
+      } else {
+        dbPath = '/tmp/part-bom.sqlite';
+      }
+    }
 
     if (dbPath !== ':memory:') {
       mkdirSync(dirname(dbPath), { recursive: true });
