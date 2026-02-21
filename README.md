@@ -90,7 +90,7 @@ Steps:
 2. Add env vars in Vercel project settings:
    - `DATABASE_URL`
    - `DIRECT_URL`
-   - `SEED_SAMPLE_DATA` (optional)
+   - `SEED_SAMPLE_DATA=false` (recommended to reduce cold-start time)
 3. Apply schema once from CI/local before first traffic:
    - `pnpm run prisma:deploy`
 4. Deploy and verify:

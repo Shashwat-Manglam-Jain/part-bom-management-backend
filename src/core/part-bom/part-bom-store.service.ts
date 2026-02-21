@@ -72,6 +72,10 @@ interface PrismaBomLinkRecord {
   createdAt: Date;
 }
 
+interface SequenceMaxRow {
+  max: number | string | bigint | null;
+}
+
 type TxClient = Prisma.TransactionClient;
 
 const SEED_PARTS: SeedPartDefinition[] = [
@@ -157,8 +161,12 @@ export class PartBomStoreService implements OnModuleInit {
     try {
       await this.initializeSequences();
 
-      const shouldSeed =
-        (process.env.SEED_SAMPLE_DATA ?? 'true').toLowerCase() !== 'false';
+      const explicitSeedFlag = process.env.SEED_SAMPLE_DATA?.toLowerCase();
+      const isVercelRuntime = Boolean(process.env.VERCEL);
+      const shouldSeed = explicitSeedFlag
+        ? explicitSeedFlag === 'true'
+        : !isVercelRuntime;
+
       if (shouldSeed) {
         await this.seedSampleData();
       }
@@ -908,50 +916,49 @@ export class PartBomStoreService implements OnModuleInit {
   }
 
   private async initializeSequences(): Promise<void> {
-    const [partRows, auditRows] = await Promise.all([
-      this.prisma.part.findMany({
-        select: {
-          id: true,
-          partNumber: true,
-        },
-      }),
-      this.prisma.auditLog.findMany({
-        select: {
-          id: true,
-        },
-      }),
-    ]);
+    const [partIdMaxRows, auditIdMaxRows, partNumberMaxRows] = await Promise.all(
+      [
+        this.prisma.$queryRaw<SequenceMaxRow[]>`
+          SELECT COALESCE(MAX((regexp_match(id, '^PART-(\\d+)$'))[1]::integer), 0) AS max
+          FROM "parts"
+        `,
+        this.prisma.$queryRaw<SequenceMaxRow[]>`
+          SELECT COALESCE(MAX((regexp_match(id, '^AUD-(\\d+)$'))[1]::integer), 0) AS max
+          FROM "audit_logs"
+        `,
+        this.prisma.$queryRaw<SequenceMaxRow[]>`
+          SELECT COALESCE(MAX((regexp_match(part_number, '^PRT-(\\d+)$'))[1]::integer), 0) AS max
+          FROM "parts"
+        `,
+      ],
+    );
 
-    this.partIdSequence = this.resolveNextSequence(
-      partRows.map((row) => row.id),
-      /^PART-(\d+)$/,
-    );
-    this.auditLogSequence = this.resolveNextSequence(
-      auditRows.map((row) => row.id),
-      /^AUD-(\d+)$/,
-    );
-    this.partNumberSequence = this.resolveNextSequence(
-      partRows.map((row) => row.partNumber),
-      /^PRT-(\d+)$/,
-    );
+    this.partIdSequence =
+      this.parseSequenceMax(partIdMaxRows.at(0)?.max, 'PART') + 1;
+    this.auditLogSequence =
+      this.parseSequenceMax(auditIdMaxRows.at(0)?.max, 'AUD') + 1;
+    this.partNumberSequence =
+      this.parseSequenceMax(partNumberMaxRows.at(0)?.max, 'PRT') + 1;
   }
 
-  private resolveNextSequence(values: string[], pattern: RegExp): number {
-    let max = 0;
-
-    for (const value of values) {
-      const matches = pattern.exec(value);
-      if (!matches) {
-        continue;
-      }
-
-      const parsed = Number.parseInt(matches[1], 10);
-      if (!Number.isNaN(parsed)) {
-        max = Math.max(max, parsed);
-      }
+  private parseSequenceMax(
+    rawValue: number | string | bigint | null | undefined,
+    sequenceLabel: string,
+  ): number {
+    if (rawValue === null || rawValue === undefined) {
+      return 0;
     }
 
-    return max + 1;
+    const parsedValue =
+      typeof rawValue === 'bigint' ? Number(rawValue) : Number(rawValue);
+
+    if (!Number.isFinite(parsedValue) || parsedValue < 0) {
+      throw new Error(
+        `Invalid ${sequenceLabel} sequence value '${String(rawValue)}' returned from database.`,
+      );
+    }
+
+    return Math.floor(parsedValue);
   }
 
   private rethrowMissingSchemaError(error: unknown): never {
