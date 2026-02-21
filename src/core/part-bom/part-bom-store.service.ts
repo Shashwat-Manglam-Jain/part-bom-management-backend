@@ -966,7 +966,7 @@ export class PartBomStoreService implements OnModuleInit {
           ? prismaError.meta.table
           : 'required table';
       throw new Error(
-        `Database schema is not initialized (${table} is missing). Run \`pnpm run prisma:deploy\` in backend and restart the API.`,
+        `Database schema is not initialized (${table} is missing). Run \`pnpm run prisma:sync\` in backend and restart the API.`,
       );
     }
 

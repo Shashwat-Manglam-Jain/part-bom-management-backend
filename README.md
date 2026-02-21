@@ -34,18 +34,28 @@ DATABASE_URL="postgresql://postgres.<project-ref>:<db-password>@aws-<region>.poo
 DIRECT_URL="postgresql://postgres.<project-ref>:<db-password>@db.<project-ref>.supabase.co:5432/postgres?sslmode=require"
 ```
 
+If `DIRECT_URL` with `db.<project-ref>.supabase.co:5432` gives `P1001` in your network, use:
+```bash
+DIRECT_URL="postgresql://postgres.<project-ref>:<db-password>@aws-<region>.pooler.supabase.com:5432/postgres?sslmode=require"
+```
+
 Optional:
 - `SEED_SAMPLE_DATA=false` to disable startup seed data.
 - `TEST_DATABASE_URL` for e2e tests (falls back to `DATABASE_URL`).
 
-### 3) Apply database migrations
+### 3) Initialize database schema
 ```bash
-pnpm run prisma:deploy
+pnpm run prisma:sync
 ```
 
 For local development you can also use:
 ```bash
 pnpm run prisma:migrate
+```
+
+If you only want to apply committed migrations:
+```bash
+pnpm run prisma:deploy
 ```
 
 ### 4) Start server (dev)
@@ -141,3 +151,5 @@ Update BOM link payload:
 - `pnpm run prisma:generate` - generate Prisma client
 - `pnpm run prisma:migrate` - run Prisma dev migration flow
 - `pnpm run prisma:deploy` - apply existing migrations
+- `pnpm run prisma:push` - push schema directly to database
+- `pnpm run prisma:sync` - deploy migrations, fallback to schema push
