@@ -7,14 +7,18 @@ import { UpdateBomLinkDto } from './dto/update-bom-link.dto';
 export class BomService {
   constructor(private readonly store: PartBomStoreService) {}
 
-  getBomTree(rootPartId: string, depthQuery?: string, nodeLimitQuery?: string) {
+  async getBomTree(
+    rootPartId: string,
+    depthQuery?: string,
+    nodeLimitQuery?: string,
+  ) {
     const depth = this.parseDepth(depthQuery);
     const nodeLimit = this.parseNodeLimit(nodeLimitQuery);
 
     return this.store.getBomTree(rootPartId, depth, nodeLimit);
   }
 
-  createBomLink(payload: CreateBomLinkDto) {
+  async createBomLink(payload: CreateBomLinkDto) {
     if (!payload.parentId || !payload.childId) {
       throw new BadRequestException('Both parentId and childId are required.');
     }
@@ -26,7 +30,7 @@ export class BomService {
     });
   }
 
-  updateBomLink(payload: UpdateBomLinkDto) {
+  async updateBomLink(payload: UpdateBomLinkDto) {
     if (!payload.parentId || !payload.childId) {
       throw new BadRequestException('Both parentId and childId are required.');
     }
@@ -42,8 +46,8 @@ export class BomService {
     });
   }
 
-  removeBomLink(parentId: string, childId: string) {
-    this.store.removeBomLink(parentId, childId);
+  async removeBomLink(parentId: string, childId: string) {
+    await this.store.removeBomLink(parentId, childId);
 
     return {
       message: 'BOM link removed successfully.',

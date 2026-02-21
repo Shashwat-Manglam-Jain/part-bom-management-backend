@@ -1,0 +1,59 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum AuditAction {
+  PART_CREATED
+  PART_UPDATED
+  BOM_LINK_CREATED
+  BOM_LINK_UPDATED
+  BOM_LINK_REMOVED
+}
+
+model Part {
+  id          String    @id
+  partNumber  String    @unique(map: "parts_part_number_key") @map("part_number")
+  name        String
+  description String    @default("")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  parentLinks BomLink[] @relation("BomParent")
+  childLinks  BomLink[] @relation("BomChild")
+  auditLogs   AuditLog[]
+
+  @@index([partNumber], map: "idx_parts_part_number")
+  @@map("parts")
+}
+
+model BomLink {
+  parentId  String   @map("parent_id")
+  childId   String   @map("child_id")
+  quantity  Int
+  createdAt DateTime @default(now()) @map("created_at")
+  parent    Part     @relation("BomParent", fields: [parentId], references: [id], onDelete: Cascade)
+  child     Part     @relation("BomChild", fields: [childId], references: [id], onDelete: Cascade)
+
+  @@id([parentId, childId], map: "bom_links_pkey")
+  @@index([parentId], map: "idx_bom_links_parent")
+  @@index([childId], map: "idx_bom_links_child")
+  @@map("bom_links")
+}
+
+model AuditLog {
+  id        String      @id
+  partId    String      @map("part_id")
+  action    AuditAction
+  message   String
+  timestamp DateTime    @default(now())
+  metadata  Json?
+  part      Part        @relation(fields: [partId], references: [id], onDelete: Cascade)
+
+  @@index([partId, timestamp(sort: Desc)], map: "idx_audit_logs_part_timestamp")
+  @@map("audit_logs")
+}

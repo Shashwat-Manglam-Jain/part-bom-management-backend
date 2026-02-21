@@ -11,7 +11,8 @@ NestJS backend for managing parts, BOM links, and audit logs.
 ## Tech stack
 - NestJS 11
 - TypeScript
-- SQLite (`better-sqlite3`)
+- Prisma ORM
+- PostgreSQL
 - Node.js 20.x
 
 ## Run locally
@@ -21,7 +22,33 @@ NestJS backend for managing parts, BOM links, and audit logs.
 pnpm install
 ```
 
-### 2) Start server (dev)
+### 2) Configure environment
+Set these variables in `backend/.env`:
+
+- `DATABASE_URL`: pooled connection used by Prisma Client at runtime.
+- `DIRECT_URL`: direct connection used by Prisma Migrate.
+
+Supabase example:
+```bash
+DATABASE_URL="postgresql://postgres.<project-ref>:<db-password>@aws-<region>.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&sslmode=require"
+DIRECT_URL="postgresql://postgres.<project-ref>:<db-password>@db.<project-ref>.supabase.co:5432/postgres?sslmode=require"
+```
+
+Optional:
+- `SEED_SAMPLE_DATA=false` to disable startup seed data.
+- `TEST_DATABASE_URL` for e2e tests (falls back to `DATABASE_URL`).
+
+### 3) Apply database migrations
+```bash
+pnpm run prisma:deploy
+```
+
+For local development you can also use:
+```bash
+pnpm run prisma:migrate
+```
+
+### 4) Start server (dev)
 ```bash
 pnpm run start:dev
 ```
@@ -30,14 +57,7 @@ Server runs on:
 - `http://localhost:3000` (default)
 - Use `PORT` env var to change it.
 
-Database settings:
-- `DATABASE_PATH` (optional): SQLite file path
-  - Local default: `./data/part-bom.sqlite`
-  - Vercel default: `/tmp/part-bom.sqlite`
-  - On Vercel, non-`/tmp` paths are ignored and fallback to `/tmp/part-bom.sqlite`
-- `SEED_SAMPLE_DATA` (optional): set `false` to disable startup seed
-
-### 3) Health check
+### 5) Health check
 ```http
 GET /health
 ```
@@ -108,24 +128,8 @@ Update BOM link payload:
 - Max BOM node limit: `80`
 
 ## Data behavior
-- Data is persisted in SQLite.
-- Default DB file: `backend/data/part-bom.sqlite`.
-- Seeded dataset is inserted only when DB is empty (root part: `Autonomous Cart Assembly`).
-- On Vercel, SQLite file is stored in `/tmp`, so data is ephemeral per serverless instance.
-
-## Deploy to Vercel (backend)
-1. Import this repo in Vercel.
-2. Set project **Root Directory** to `backend`.
-3. Keep build command default (`pnpm run build`).
-4. Set Node.js version to `20.x` in Vercel project settings.
-5. Add environment variables:
-   - `SEED_SAMPLE_DATA=true` (or `false` if you do not want seed data)
-   - `DATABASE_PATH=/tmp/part-bom.sqlite` (recommended on Vercel)
-6. Deploy.
-
-Notes:
-- Vercel serverless filesystem is ephemeral. SQLite data will not be permanently stored.
-- For permanent production data, use a managed database (PostgreSQL/MySQL).
+- Data is persisted in PostgreSQL.
+- Seeded dataset is applied idempotently on startup when `SEED_SAMPLE_DATA` is not `false` (root part: `Autonomous Cart Assembly`).
 
 ## Useful scripts
 - `pnpm run start` - run app
@@ -134,6 +138,6 @@ Notes:
 - `pnpm run lint` - lint code
 - `pnpm run test` - unit tests
 - `pnpm run test:e2e` - end-to-end tests
-
-## Quick explanation
-"This backend is a lightweight BOM API built with NestJS. It manages parts, BOM relationships, and audit logs while enforcing core BOM rules such as no cycles and valid quantities. Data is persisted in SQLite with optional startup seed data."
+- `pnpm run prisma:generate` - generate Prisma client
+- `pnpm run prisma:migrate` - run Prisma dev migration flow
+- `pnpm run prisma:deploy` - apply existing migrations

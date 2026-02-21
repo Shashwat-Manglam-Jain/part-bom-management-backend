@@ -8,19 +8,19 @@ import { UpdatePartDto } from './dto/update-part.dto';
 export class PartsService {
   constructor(private readonly store: PartBomStoreService) {}
 
-  searchParts(filters: PartSearchFilters) {
+  async searchParts(filters: PartSearchFilters) {
     return this.store.searchParts(filters);
   }
 
-  getPartDetails(partId: string) {
+  async getPartDetails(partId: string) {
     return this.store.getPartDetails(partId);
   }
 
-  getPartAuditLogs(partId: string) {
+  async getPartAuditLogs(partId: string) {
     return this.store.getPartAuditLogs(partId);
   }
 
-  createPart(payload: CreatePartDto) {
+  async createPart(payload: CreatePartDto) {
     if (!payload.name || !payload.name.trim()) {
       throw new BadRequestException('Part name is required.');
     }
@@ -32,7 +32,7 @@ export class PartsService {
     });
   }
 
-  updatePart(partId: string, payload: UpdatePartDto) {
+  async updatePart(partId: string, payload: UpdatePartDto) {
     if (
       payload.name === undefined &&
       payload.description === undefined &&

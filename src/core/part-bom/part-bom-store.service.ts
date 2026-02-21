@@ -2,11 +2,10 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
-  OnModuleDestroy,
+  OnModuleInit,
 } from '@nestjs/common';
-import { mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import BetterSqlite3 from 'better-sqlite3';
+import { AuditAction as PrismaAuditAction, Prisma } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
 import {
   AuditAction,
   AuditLog,
@@ -44,89 +43,131 @@ interface UpdateBomLinkInput {
   quantity: number;
 }
 
-interface PartRow {
-  id: string;
-  part_number: string;
+interface SeedPartDefinition {
+  key: string;
+  partNumber: string;
   name: string;
-  description: string;
-  created_at: string;
-  updated_at: string;
+  description?: string;
 }
 
-interface BomLinkRow {
+interface SeedBomLinkDefinition {
+  parentKey: string;
+  childKey: string;
+  quantity: number;
+}
+
+interface PrismaPartRecord {
+  id: string;
+  partNumber: string;
+  name: string;
+  description: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+interface PrismaBomLinkRecord {
   parentId: string;
   childId: string;
   quantity: number;
-  createdAt: string;
+  createdAt: Date;
 }
 
-interface AuditLogRow {
-  id: string;
-  partId: string;
-  action: AuditAction;
-  message: string;
-  timestamp: string;
-  metadata: string | null;
-}
+type TxClient = Prisma.TransactionClient;
+
+const SEED_PARTS: SeedPartDefinition[] = [
+  {
+    key: 'root',
+    partNumber: 'PRT-000001',
+    name: 'Autonomous Cart Assembly',
+    description: 'Root product assembly used for startup sample data.',
+  },
+  { key: 'mechanical', partNumber: 'PRT-000002', name: 'Mechanical Module' },
+  { key: 'electrical', partNumber: 'PRT-000003', name: 'Electrical Module' },
+  { key: 'controls', partNumber: 'PRT-000004', name: 'Controls Module' },
+  { key: 'basePlate', partNumber: 'PRT-000005', name: 'Base Plate' },
+  { key: 'suspension', partNumber: 'PRT-000006', name: 'Suspension Kit' },
+  { key: 'wheelSet', partNumber: 'PRT-000007', name: 'Wheel Set' },
+  { key: 'harness', partNumber: 'PRT-000008', name: 'Primary Harness' },
+  { key: 'batteryPack', partNumber: 'PRT-000009', name: 'Battery Pack' },
+  { key: 'safetyRelay', partNumber: 'PRT-000010', name: 'Safety Relay' },
+  {
+    key: 'controllerBoard',
+    partNumber: 'PRT-000011',
+    name: 'Controller Board',
+  },
+  { key: 'operatorPanel', partNumber: 'PRT-000012', name: 'Operator Panel' },
+  { key: 'coolingModule', partNumber: 'PRT-000013', name: 'Cooling Module' },
+  {
+    key: 'frontLeftWheel',
+    partNumber: 'PRT-000014',
+    name: 'Front Left Wheel',
+  },
+  {
+    key: 'frontRightWheel',
+    partNumber: 'PRT-000015',
+    name: 'Front Right Wheel',
+  },
+  { key: 'rearLeftWheel', partNumber: 'PRT-000016', name: 'Rear Left Wheel' },
+  {
+    key: 'rearRightWheel',
+    partNumber: 'PRT-000017',
+    name: 'Rear Right Wheel',
+  },
+  { key: 'lidar', partNumber: 'PRT-000018', name: 'LiDAR Sensor' },
+  { key: 'imu', partNumber: 'PRT-000019', name: 'IMU Sensor' },
+  { key: 'cpuModule', partNumber: 'PRT-000020', name: 'CPU Module' },
+  { key: 'ioModule', partNumber: 'PRT-000021', name: 'I/O Module' },
+];
+
+const SEED_BOM_LINKS: SeedBomLinkDefinition[] = [
+  { parentKey: 'root', childKey: 'mechanical', quantity: 1 },
+  { parentKey: 'root', childKey: 'electrical', quantity: 1 },
+  { parentKey: 'root', childKey: 'controls', quantity: 1 },
+  { parentKey: 'mechanical', childKey: 'basePlate', quantity: 1 },
+  { parentKey: 'mechanical', childKey: 'suspension', quantity: 1 },
+  { parentKey: 'mechanical', childKey: 'wheelSet', quantity: 1 },
+  { parentKey: 'wheelSet', childKey: 'frontLeftWheel', quantity: 1 },
+  { parentKey: 'wheelSet', childKey: 'frontRightWheel', quantity: 1 },
+  { parentKey: 'wheelSet', childKey: 'rearLeftWheel', quantity: 1 },
+  { parentKey: 'wheelSet', childKey: 'rearRightWheel', quantity: 1 },
+  { parentKey: 'electrical', childKey: 'harness', quantity: 1 },
+  { parentKey: 'electrical', childKey: 'batteryPack', quantity: 1 },
+  { parentKey: 'electrical', childKey: 'safetyRelay', quantity: 1 },
+  { parentKey: 'controls', childKey: 'controllerBoard', quantity: 1 },
+  { parentKey: 'controls', childKey: 'operatorPanel', quantity: 1 },
+  { parentKey: 'controls', childKey: 'coolingModule', quantity: 1 },
+  { parentKey: 'controllerBoard', childKey: 'lidar', quantity: 1 },
+  { parentKey: 'controllerBoard', childKey: 'imu', quantity: 1 },
+  { parentKey: 'controllerBoard', childKey: 'cpuModule', quantity: 1 },
+  { parentKey: 'controllerBoard', childKey: 'ioModule', quantity: 1 },
+];
 
 @Injectable()
-export class PartBomStoreService implements OnModuleDestroy {
+export class PartBomStoreService implements OnModuleInit {
   readonly maxExpandDepth = 5;
   readonly maxExpandNodeLimit = 80;
-
-  private readonly db: BetterSqlite3.Database;
 
   private partIdSequence = 1;
   private auditLogSequence = 1;
   private partNumberSequence = 1;
 
-  constructor() {
-    const isVercel = process.env.VERCEL === '1';
-    const configuredDatabasePath = process.env.DATABASE_PATH?.trim();
-    const localDefaultDatabasePath = join(
-      process.cwd(),
-      'data',
-      'part-bom.sqlite',
-    );
+  constructor(private readonly prisma: PrismaService) {}
 
-    let dbPath = configuredDatabasePath || localDefaultDatabasePath;
-    if (isVercel) {
-      if (
-        configuredDatabasePath === ':memory:' ||
-        configuredDatabasePath?.startsWith('/tmp/')
-      ) {
-        dbPath = configuredDatabasePath;
-      } else {
-        dbPath = '/tmp/part-bom.sqlite';
+  async onModuleInit(): Promise<void> {
+    try {
+      await this.initializeSequences();
+
+      const shouldSeed =
+        (process.env.SEED_SAMPLE_DATA ?? 'true').toLowerCase() !== 'false';
+      if (shouldSeed) {
+        await this.seedSampleData();
       }
-    }
-
-    if (dbPath !== ':memory:') {
-      mkdirSync(dirname(dbPath), { recursive: true });
-    }
-
-    this.db = new BetterSqlite3(dbPath);
-    this.db.pragma('foreign_keys = ON');
-
-    if (dbPath !== ':memory:' && !isVercel) {
-      this.db.pragma('journal_mode = WAL');
-    }
-
-    this.initializeSchema();
-    this.initializeSequences();
-
-    const shouldSeed =
-      (process.env.SEED_SAMPLE_DATA ?? 'true').toLowerCase() !== 'false';
-    if (shouldSeed && this.getPartsCount() === 0) {
-      this.seedSampleData();
+    } catch (error) {
+      this.rethrowMissingSchemaError(error);
     }
   }
 
-  onModuleDestroy() {
-    this.db.close();
-  }
-
-  createPart(input: CreatePartInput): Part {
+  async createPart(input: CreatePartInput): Promise<Part> {
     const normalizedName = input.name.trim();
     if (!normalizedName) {
       throw new BadRequestException('Part name is required.');
@@ -136,44 +177,24 @@ export class PartBomStoreService implements OnModuleDestroy {
     const partNumber =
       requestedPartNumber && requestedPartNumber.length > 0
         ? requestedPartNumber
-        : this.allocatePartNumber();
+        : await this.allocatePartNumber();
 
-    this.assertPartNumberIsAvailable(partNumber);
+    await this.assertPartNumberIsAvailable(partNumber);
 
-    const now = this.getTimestamp();
-    const part: Part = {
-      id: this.allocatePartId(),
-      partNumber,
-      name: normalizedName,
-      description: input.description?.trim() ?? '',
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    this.db.transaction(() => {
-      this.db
-        .prepare(
-          `INSERT INTO parts (
-            id,
-            part_number,
-            name,
-            description,
-            created_at,
-            updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          part.id,
-          part.partNumber,
-          part.name,
-          part.description,
-          part.createdAt,
-          part.updatedAt,
-        );
+    const created = await this.prisma.$transaction(async (tx) => {
+      const part = await tx.part.create({
+        data: {
+          id: this.allocatePartId(),
+          partNumber,
+          name: normalizedName,
+          description: input.description?.trim() ?? '',
+        },
+      });
 
       this.updatePartNumberSequence(part.partNumber);
 
-      this.writeAudit(
+      await this.writeAudit(
+        tx,
         part.id,
         'PART_CREATED',
         `Part ${part.partNumber} was created.`,
@@ -181,13 +202,15 @@ export class PartBomStoreService implements OnModuleDestroy {
           name: part.name,
         },
       );
-    })();
 
-    return { ...part };
+      return part;
+    });
+
+    return this.toPart(created);
   }
 
-  updatePart(partId: string, input: UpdatePartInput): Part {
-    const part = this.requirePart(partId);
+  async updatePart(partId: string, input: UpdatePartInput): Promise<Part> {
+    const part = await this.requirePart(partId);
 
     const nextName = input.name !== undefined ? input.name.trim() : part.name;
     if (!nextName) {
@@ -209,86 +232,96 @@ export class PartBomStoreService implements OnModuleDestroy {
       }
 
       if (normalizedPartNumber !== part.partNumber) {
-        this.assertPartNumberIsAvailable(normalizedPartNumber);
+        await this.assertPartNumberIsAvailable(normalizedPartNumber, partId);
         this.updatePartNumberSequence(normalizedPartNumber);
       }
 
       nextPartNumber = normalizedPartNumber;
     }
 
-    const updatedPart: Part = {
-      ...part,
-      partNumber: nextPartNumber,
-      name: nextName,
-      description: nextDescription,
-      updatedAt: this.getTimestamp(),
-    };
+    const updatedPart = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.part.update({
+        where: {
+          id: partId,
+        },
+        data: {
+          partNumber: nextPartNumber,
+          name: nextName,
+          description: nextDescription,
+        },
+      });
 
-    this.db.transaction(() => {
-      this.db
-        .prepare(
-          `UPDATE parts
-            SET part_number = ?,
-                name = ?,
-                description = ?,
-                updated_at = ?
-          WHERE id = ?`,
-        )
-        .run(
-          updatedPart.partNumber,
-          updatedPart.name,
-          updatedPart.description,
-          updatedPart.updatedAt,
-          partId,
-        );
-
-      this.writeAudit(
+      await this.writeAudit(
+        tx,
         partId,
         'PART_UPDATED',
-        `Part ${updatedPart.partNumber} was updated.`,
+        `Part ${updated.partNumber} was updated.`,
         {
-          name: updatedPart.name,
+          name: updated.name,
         },
       );
-    })();
 
-    return { ...updatedPart };
+      return updated;
+    });
+
+    return this.toPart(updatedPart);
   }
 
-  searchParts(filters: PartSearchFilters): PartSummary[] {
-    const byPartNumber = filters.partNumber?.trim().toLowerCase();
-    const byName = filters.name?.trim().toLowerCase();
-    const byAny = filters.q?.trim().toLowerCase();
+  async searchParts(filters: PartSearchFilters): Promise<PartSummary[]> {
+    const byPartNumber = filters.partNumber?.trim();
+    const byName = filters.name?.trim();
+    const byAny = filters.q?.trim();
 
-    const whereClauses: string[] = [];
-    const params: string[] = [];
+    const conditions: Prisma.PartWhereInput[] = [];
 
     if (byPartNumber) {
-      whereClauses.push('LOWER(part_number) LIKE ?');
-      params.push(`%${byPartNumber}%`);
+      conditions.push({
+        partNumber: {
+          contains: byPartNumber,
+          mode: 'insensitive',
+        },
+      });
     }
 
     if (byName) {
-      whereClauses.push('LOWER(name) LIKE ?');
-      params.push(`%${byName}%`);
+      conditions.push({
+        name: {
+          contains: byName,
+          mode: 'insensitive',
+        },
+      });
     }
 
     if (byAny) {
-      whereClauses.push('(LOWER(name) LIKE ? OR LOWER(part_number) LIKE ?)');
-      params.push(`%${byAny}%`, `%${byAny}%`);
+      conditions.push({
+        OR: [
+          {
+            name: {
+              contains: byAny,
+              mode: 'insensitive',
+            },
+          },
+          {
+            partNumber: {
+              contains: byAny,
+              mode: 'insensitive',
+            },
+          },
+        ],
+      });
     }
 
-    const whereQuery =
-      whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
-
-    const rows = this.db
-      .prepare(
-        `SELECT id, part_number AS partNumber, name
-         FROM parts
-         ${whereQuery}
-         ORDER BY part_number ASC`,
-      )
-      .all(...params) as PartSummary[];
+    const rows = await this.prisma.part.findMany({
+      where: conditions.length > 0 ? { AND: conditions } : undefined,
+      orderBy: {
+        partNumber: 'asc',
+      },
+      select: {
+        id: true,
+        partNumber: true,
+        name: true,
+      },
+    });
 
     return rows.map((row) => ({
       id: row.id,
@@ -297,28 +330,63 @@ export class PartBomStoreService implements OnModuleDestroy {
     }));
   }
 
-  getPartDetails(partId: string): PartDetails {
-    const part = this.requirePart(partId);
+  async getPartDetails(partId: string): Promise<PartDetails> {
+    const part = await this.requirePart(partId);
 
-    const parentParts = this.db
-      .prepare(
-        `SELECT p.id, p.part_number AS partNumber, p.name
-         FROM bom_links bl
-         INNER JOIN parts p ON p.id = bl.parent_id
-         WHERE bl.child_id = ?
-         ORDER BY p.part_number ASC`,
-      )
-      .all(partId) as PartSummary[];
+    const [parentLinks, childLinks] = await Promise.all([
+      this.prisma.bomLink.findMany({
+        where: {
+          childId: partId,
+        },
+        orderBy: {
+          parent: {
+            partNumber: 'asc',
+          },
+        },
+        select: {
+          parent: {
+            select: {
+              id: true,
+              partNumber: true,
+              name: true,
+            },
+          },
+        },
+      }),
+      this.prisma.bomLink.findMany({
+        where: {
+          parentId: partId,
+        },
+        orderBy: {
+          child: {
+            partNumber: 'asc',
+          },
+        },
+        select: {
+          quantity: true,
+          child: {
+            select: {
+              id: true,
+              partNumber: true,
+              name: true,
+            },
+          },
+        },
+      }),
+    ]);
 
-    const childParts = this.db
-      .prepare(
-        `SELECT p.id, p.part_number AS partNumber, p.name, bl.quantity
-         FROM bom_links bl
-         INNER JOIN parts p ON p.id = bl.child_id
-         WHERE bl.parent_id = ?
-         ORDER BY p.part_number ASC`,
-      )
-      .all(partId) as ChildPartUsage[];
+    const parentParts: PartSummary[] = parentLinks.map((row) => ({
+      id: row.parent.id,
+      partNumber: row.parent.partNumber,
+      name: row.parent.name,
+    }));
+
+    const childParts: ChildPartUsage[] = childLinks.map((row) => ({
+      id: row.child.id,
+      partNumber: row.child.partNumber,
+      name: row.child.name,
+      quantity: row.quantity,
+    }));
 
     return {
       ...part,
@@ -329,39 +397,33 @@ export class PartBomStoreService implements OnModuleDestroy {
     };
   }
 
-  getPartAuditLogs(partId: string): AuditLog[] {
-    this.requirePart(partId);
+  async getPartAuditLogs(partId: string): Promise<AuditLog[]> {
+    await this.requirePart(partId);
 
-    const rows = this.db
-      .prepare(
-        `SELECT
-          id,
-          part_id AS partId,
-          action,
-          message,
-          timestamp,
-          metadata
-         FROM audit_logs
-         WHERE part_id = ?
-         ORDER BY timestamp DESC`,
-      )
-      .all(partId) as AuditLogRow[];
+    const rows = await this.prisma.auditLog.findMany({
+      where: {
+        partId,
+      },
+      orderBy: {
+        timestamp: 'desc',
+      },
+    });
 
     return rows.map((row) => ({
       id: row.id,
       partId: row.partId,
       action: row.action,
       message: row.message,
-      timestamp: row.timestamp,
-      metadata: row.metadata
-        ? (JSON.parse(row.metadata) as Record<string, string | number>)
-        : undefined,
+      timestamp: row.timestamp.toISOString(),
+      metadata: this.toAuditMetadata(row.metadata),
     }));
   }
 
-  createBomLink(input: CreateBomLinkInput): BomLink {
-    const parent = this.requirePart(input.parentId);
-    const child = this.requirePart(input.childId);
+  async createBomLink(input: CreateBomLinkInput): Promise<BomLink> {
+    const [parent, child] = await Promise.all([
+      this.requirePart(input.parentId),
+      this.requirePart(input.childId),
+    ]);
 
     if (parent.id === child.id) {
       throw new BadRequestException(
@@ -374,11 +436,17 @@ export class PartBomStoreService implements OnModuleDestroy {
       throw new BadRequestException('BOM quantity must be a positive integer.');
     }
 
-    const existing = this.db
-      .prepare(
-        'SELECT 1 AS found FROM bom_links WHERE parent_id = ? AND child_id = ?',
-      )
-      .get(parent.id, child.id) as { found: number } | undefined;
+    const existing = await this.prisma.bomLink.findUnique({
+      where: {
+        parentId_childId: {
+          parentId: parent.id,
+          childId: child.id,
+        },
+      },
+      select: {
+        parentId: true,
+      },
+    });
 
     if (existing) {
       throw new BadRequestException(
@@ -386,28 +454,23 @@ export class PartBomStoreService implements OnModuleDestroy {
       );
     }
 
-    if (this.isReachable(child.id, parent.id)) {
+    if (await this.isReachable(child.id, parent.id)) {
       throw new BadRequestException(
         'BOM link creation failed because it would introduce a cycle.',
       );
     }
 
-    const link: BomLink = {
-      parentId: parent.id,
-      childId: child.id,
-      quantity,
-      createdAt: this.getTimestamp(),
-    };
+    const createdLink = await this.prisma.$transaction(async (tx) => {
+      const link = await tx.bomLink.create({
+        data: {
+          parentId: parent.id,
+          childId: child.id,
+          quantity,
+        },
+      });
 
-    this.db.transaction(() => {
-      this.db
-        .prepare(
-          `INSERT INTO bom_links (parent_id, child_id, quantity, created_at)
-           VALUES (?, ?, ?, ?)`,
-        )
-        .run(link.parentId, link.childId, link.quantity, link.createdAt);
-
-      this.writeAudit(
+      await this.writeAudit(
+        tx,
         parent.id,
         'BOM_LINK_CREATED',
         `Linked child ${child.partNumber} to ${parent.partNumber}.`,
@@ -417,7 +480,8 @@ export class PartBomStoreService implements OnModuleDestroy {
         },
       );
 
-      this.writeAudit(
+      await this.writeAudit(
+        tx,
         child.id,
         'BOM_LINK_CREATED',
         `Linked as child of ${parent.partNumber}.`,
@@ -426,26 +490,31 @@ export class PartBomStoreService implements OnModuleDestroy {
           quantity,
         },
       );
-    })();
 
-    return { ...link };
+      return link;
+    });
+
+    return this.toBomLink(createdLink);
   }
 
-  updateBomLink(input: UpdateBomLinkInput): BomLink {
-    const parent = this.requirePart(input.parentId);
-    const child = this.requirePart(input.childId);
+  async updateBomLink(input: UpdateBomLinkInput): Promise<BomLink> {
+    const [parent, child] = await Promise.all([
+      this.requirePart(input.parentId),
+      this.requirePart(input.childId),
+    ]);
 
     if (!Number.isInteger(input.quantity) || input.quantity <= 0) {
       throw new BadRequestException('BOM quantity must be a positive integer.');
     }
 
-    const existingLink = this.db
-      .prepare(
-        `SELECT created_at AS createdAt
-         FROM bom_links
-         WHERE parent_id = ? AND child_id = ?`,
-      )
-      .get(parent.id, child.id) as { createdAt: string } | undefined;
+    const existingLink = await this.prisma.bomLink.findUnique({
+      where: {
+        parentId_childId: {
+          parentId: parent.id,
+          childId: child.id,
+        },
+      },
+    });
 
     if (!existingLink) {
       throw new NotFoundException(
@@ -453,23 +522,21 @@ export class PartBomStoreService implements OnModuleDestroy {
       );
     }
 
-    const updatedLink: BomLink = {
-      parentId: parent.id,
-      childId: child.id,
-      quantity: input.quantity,
-      createdAt: existingLink.createdAt,
-    };
+    const updatedLink = await this.prisma.$transaction(async (tx) => {
+      const link = await tx.bomLink.update({
+        where: {
+          parentId_childId: {
+            parentId: parent.id,
+            childId: child.id,
+          },
+        },
+        data: {
+          quantity: input.quantity,
+        },
+      });
 
-    this.db.transaction(() => {
-      this.db
-        .prepare(
-          `UPDATE bom_links
-           SET quantity = ?
-           WHERE parent_id = ? AND child_id = ?`,
-        )
-        .run(input.quantity, parent.id, child.id);
-
-      this.writeAudit(
+      await this.writeAudit(
+        tx,
         parent.id,
         'BOM_LINK_UPDATED',
         `Updated quantity for child ${child.partNumber} in ${parent.partNumber}.`,
@@ -479,7 +546,8 @@ export class PartBomStoreService implements OnModuleDestroy {
         },
       );
 
-      this.writeAudit(
+      await this.writeAudit(
+        tx,
         child.id,
         'BOM_LINK_UPDATED',
         `Updated quantity in parent ${parent.partNumber}.`,
@@ -488,20 +556,30 @@ export class PartBomStoreService implements OnModuleDestroy {
           quantity: input.quantity,
         },
       );
-    })();
 
-    return { ...updatedLink };
+      return link;
+    });
+
+    return this.toBomLink(updatedLink);
   }
 
-  removeBomLink(parentId: string, childId: string): void {
-    const parent = this.requirePart(parentId);
-    const child = this.requirePart(childId);
+  async removeBomLink(parentId: string, childId: string): Promise<void> {
+    const [parent, child] = await Promise.all([
+      this.requirePart(parentId),
+      this.requirePart(childId),
+    ]);
 
-    const link = this.db
-      .prepare(
-        'SELECT 1 AS found FROM bom_links WHERE parent_id = ? AND child_id = ?',
-      )
-      .get(parent.id, child.id) as { found: number } | undefined;
+    const link = await this.prisma.bomLink.findUnique({
+      where: {
+        parentId_childId: {
+          parentId: parent.id,
+          childId: child.id,
+        },
+      },
+      select: {
+        parentId: true,
+      },
+    });
 
     if (!link) {
       throw new NotFoundException(
@@ -509,12 +587,18 @@ export class PartBomStoreService implements OnModuleDestroy {
       );
     }
 
-    this.db.transaction(() => {
-      this.db
-        .prepare('DELETE FROM bom_links WHERE parent_id = ? AND child_id = ?')
-        .run(parent.id, child.id);
+    await this.prisma.$transaction(async (tx) => {
+      await tx.bomLink.delete({
+        where: {
+          parentId_childId: {
+            parentId: parent.id,
+            childId: child.id,
+          },
+        },
+      });
 
-      this.writeAudit(
+      await this.writeAudit(
+        tx,
         parent.id,
         'BOM_LINK_REMOVED',
         `Removed child ${child.partNumber} from ${parent.partNumber}.`,
@@ -523,7 +607,8 @@ export class PartBomStoreService implements OnModuleDestroy {
         },
       );
 
-      this.writeAudit(
+      await this.writeAudit(
+        tx,
         child.id,
         'BOM_LINK_REMOVED',
         `Removed parent ${parent.partNumber}.`,
@@ -531,15 +616,15 @@ export class PartBomStoreService implements OnModuleDestroy {
           parentId: parent.id,
         },
       );
-    })();
+    });
   }
 
-  getBomTree(
+  async getBomTree(
     rootPartId: string,
     depth = 1,
     nodeLimit = this.maxExpandNodeLimit,
-  ): BomTreeResponse {
-    this.requirePart(rootPartId);
+  ): Promise<BomTreeResponse> {
+    await this.requirePart(rootPartId);
 
     if (!Number.isInteger(depth) || depth < 0) {
       throw new BadRequestException('Depth must be an integer >= 0.');
@@ -562,13 +647,37 @@ export class PartBomStoreService implements OnModuleDestroy {
     }
 
     let nodeCount = 0;
+    const partCache = new Map<string, Part>();
+    const childLinksCache = new Map<string, BomLink[]>();
 
-    const buildNode = (
+    const getPart = async (partId: string): Promise<Part> => {
+      const cachedPart = partCache.get(partId);
+      if (cachedPart) {
+        return cachedPart;
+      }
+
+      const part = await this.requirePart(partId);
+      partCache.set(partId, part);
+      return part;
+    };
+
+    const getChildLinks = async (partId: string): Promise<BomLink[]> => {
+      const cachedLinks = childLinksCache.get(partId);
+      if (cachedLinks) {
+        return cachedLinks;
+      }
+
+      const links = await this.getChildLinks(partId);
+      childLinksCache.set(partId, links);
+      return links;
+    };
+
+    const buildNode = async (
       partId: string,
       currentDepth: number,
       quantityFromParent: number | undefined,
       path: Set<string>,
-    ): BomTreeNode => {
+    ): Promise<BomTreeNode> => {
       if (nodeCount >= nodeLimit) {
         throw new BadRequestException(
           `BOM expansion exceeded node limit of ${nodeLimit}. Reduce depth or load incrementally.`,
@@ -577,8 +686,8 @@ export class PartBomStoreService implements OnModuleDestroy {
 
       nodeCount += 1;
 
-      const part = this.requirePart(partId);
-      const childLinks = this.getChildLinks(partId);
+      const part = await getPart(partId);
+      const childLinks = await getChildLinks(partId);
       const children: BomTreeNode[] = [];
 
       if (currentDepth < depth) {
@@ -591,7 +700,12 @@ export class PartBomStoreService implements OnModuleDestroy {
           nextPath.add(link.childId);
 
           children.push(
-            buildNode(link.childId, currentDepth + 1, link.quantity, nextPath),
+            await buildNode(
+              link.childId,
+              currentDepth + 1,
+              link.quantity,
+              nextPath,
+            ),
           );
         }
       }
@@ -609,7 +723,12 @@ export class PartBomStoreService implements OnModuleDestroy {
       return node;
     };
 
-    const tree = buildNode(rootPartId, 0, undefined, new Set([rootPartId]));
+    const tree = await buildNode(
+      rootPartId,
+      0,
+      undefined,
+      new Set([rootPartId]),
+    );
 
     return {
       rootPartId,
@@ -620,14 +739,12 @@ export class PartBomStoreService implements OnModuleDestroy {
     };
   }
 
-  private requirePart(partId: string): Part {
-    const row = this.db
-      .prepare(
-        `SELECT id, part_number, name, description, created_at, updated_at
-         FROM parts
-         WHERE id = ?`,
-      )
-      .get(partId) as PartRow | undefined;
+  private async requirePart(partId: string): Promise<Part> {
+    const row = await this.prisma.part.findUnique({
+      where: {
+        id: partId,
+      },
+    });
 
     if (!row) {
       throw new NotFoundException(`Part '${partId}' was not found.`);
@@ -636,27 +753,19 @@ export class PartBomStoreService implements OnModuleDestroy {
     return this.toPart(row);
   }
 
-  private getChildLinks(parentId: string): BomLink[] {
-    const rows = this.db
-      .prepare(
-        `SELECT
-          bl.parent_id AS parentId,
-          bl.child_id AS childId,
-          bl.quantity,
-          bl.created_at AS createdAt
-         FROM bom_links bl
-         INNER JOIN parts p ON p.id = bl.child_id
-         WHERE bl.parent_id = ?
-         ORDER BY p.part_number ASC`,
-      )
-      .all(parentId) as BomLinkRow[];
+  private async getChildLinks(parentId: string): Promise<BomLink[]> {
+    const rows = await this.prisma.bomLink.findMany({
+      where: {
+        parentId,
+      },
+      orderBy: {
+        child: {
+          partNumber: 'asc',
+        },
+      },
+    });
 
-    return rows.map((row) => ({
-      parentId: row.parentId,
-      childId: row.childId,
-      quantity: row.quantity,
-      createdAt: row.createdAt,
-    }));
+    return rows.map((row) => this.toBomLink(row));
   }
 
   private toPartSummary(part: Part): PartSummary {
@@ -679,14 +788,19 @@ export class PartBomStoreService implements OnModuleDestroy {
     return id;
   }
 
-  private allocatePartNumber(): string {
+  private async allocatePartNumber(): Promise<string> {
     while (true) {
       const candidate = `PRT-${String(this.partNumberSequence).padStart(6, '0')}`;
       this.partNumberSequence += 1;
 
-      const existing = this.db
-        .prepare('SELECT id FROM parts WHERE part_number = ?')
-        .get(candidate) as { id: string } | undefined;
+      const existing = await this.prisma.part.findUnique({
+        where: {
+          partNumber: candidate,
+        },
+        select: {
+          id: true,
+        },
+      });
 
       if (!existing) {
         return candidate;
@@ -694,12 +808,20 @@ export class PartBomStoreService implements OnModuleDestroy {
     }
   }
 
-  private assertPartNumberIsAvailable(partNumber: string): void {
-    const existing = this.db
-      .prepare('SELECT id FROM parts WHERE part_number = ?')
-      .get(partNumber) as { id: string } | undefined;
+  private async assertPartNumberIsAvailable(
+    partNumber: string,
+    excludedPartId?: string,
+  ): Promise<void> {
+    const existing = await this.prisma.part.findUnique({
+      where: {
+        partNumber,
+      },
+      select: {
+        id: true,
+      },
+    });
 
-    if (existing) {
+    if (existing && existing.id !== excludedPartId) {
       throw new BadRequestException(
         `Part number '${partNumber}' already exists.`,
       );
@@ -723,13 +845,13 @@ export class PartBomStoreService implements OnModuleDestroy {
     );
   }
 
-  private getTimestamp(): string {
-    return new Date().toISOString();
-  }
-
-  private isReachable(startPartId: string, targetPartId: string): boolean {
+  private async isReachable(
+    startPartId: string,
+    targetPartId: string,
+  ): Promise<boolean> {
     const stack: string[] = [startPartId];
     const visited = new Set<string>();
+    const childIdsCache = new Map<string, string[]>();
 
     while (stack.length > 0) {
       const partId = stack.pop();
@@ -743,99 +865,62 @@ export class PartBomStoreService implements OnModuleDestroy {
 
       visited.add(partId);
 
-      const childRows = this.db
-        .prepare(
-          'SELECT child_id AS childId FROM bom_links WHERE parent_id = ?',
-        )
-        .all(partId) as Array<{ childId: string }>;
+      let childIds = childIdsCache.get(partId);
+      if (!childIds) {
+        const childRows = await this.prisma.bomLink.findMany({
+          where: {
+            parentId: partId,
+          },
+          select: {
+            childId: true,
+          },
+        });
 
-      for (const row of childRows) {
-        stack.push(row.childId);
+        childIds = childRows.map((row) => row.childId);
+        childIdsCache.set(partId, childIds);
+      }
+
+      for (const childId of childIds) {
+        stack.push(childId);
       }
     }
 
     return false;
   }
 
-  private writeAudit(
+  private async writeAudit(
+    tx: TxClient,
     partId: string,
     action: AuditAction,
     message: string,
     metadata?: Record<string, string | number>,
-  ): void {
-    const log: AuditLog = {
-      id: this.allocateAuditLogId(),
-      partId,
-      action,
-      message,
-      timestamp: this.getTimestamp(),
-      metadata,
-    };
-
-    this.db
-      .prepare(
-        `INSERT INTO audit_logs (id, part_id, action, message, timestamp, metadata)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        log.id,
-        log.partId,
-        log.action,
-        log.message,
-        log.timestamp,
-        log.metadata ? JSON.stringify(log.metadata) : null,
-      );
+  ): Promise<void> {
+    await tx.auditLog.create({
+      data: {
+        id: this.allocateAuditLogId(),
+        partId,
+        action: action as PrismaAuditAction,
+        message,
+        timestamp: new Date(),
+        metadata: metadata ? (metadata as Prisma.InputJsonObject) : undefined,
+      },
+    });
   }
 
-  private initializeSchema(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS parts (
-        id TEXT PRIMARY KEY,
-        part_number TEXT NOT NULL UNIQUE,
-        name TEXT NOT NULL,
-        description TEXT NOT NULL DEFAULT '',
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS bom_links (
-        parent_id TEXT NOT NULL,
-        child_id TEXT NOT NULL,
-        quantity INTEGER NOT NULL,
-        created_at TEXT NOT NULL,
-        PRIMARY KEY (parent_id, child_id),
-        FOREIGN KEY (parent_id) REFERENCES parts(id) ON DELETE CASCADE,
-        FOREIGN KEY (child_id) REFERENCES parts(id) ON DELETE CASCADE,
-        CHECK (quantity > 0)
-      );
-
-      CREATE TABLE IF NOT EXISTS audit_logs (
-        id TEXT PRIMARY KEY,
-        part_id TEXT NOT NULL,
-        action TEXT NOT NULL,
-        message TEXT NOT NULL,
-        timestamp TEXT NOT NULL,
-        metadata TEXT,
-        FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE CASCADE
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_parts_part_number ON parts(part_number);
-      CREATE INDEX IF NOT EXISTS idx_bom_links_parent ON bom_links(parent_id);
-      CREATE INDEX IF NOT EXISTS idx_bom_links_child ON bom_links(child_id);
-      CREATE INDEX IF NOT EXISTS idx_audit_logs_part_timestamp ON audit_logs(part_id, timestamp DESC);
-    `);
-  }
-
-  private initializeSequences(): void {
-    const partRows = this.db.prepare('SELECT id FROM parts').all() as Array<{
-      id: string;
-    }>;
-    const auditRows = this.db
-      .prepare('SELECT id FROM audit_logs')
-      .all() as Array<{ id: string }>;
-    const partNumberRows = this.db
-      .prepare('SELECT part_number AS partNumber FROM parts')
-      .all() as Array<{ partNumber: string }>;
+  private async initializeSequences(): Promise<void> {
+    const [partRows, auditRows] = await Promise.all([
+      this.prisma.part.findMany({
+        select: {
+          id: true,
+          partNumber: true,
+        },
+      }),
+      this.prisma.auditLog.findMany({
+        select: {
+          id: true,
+        },
+      }),
+    ]);
 
     this.partIdSequence = this.resolveNextSequence(
       partRows.map((row) => row.id),
@@ -846,7 +931,7 @@ export class PartBomStoreService implements OnModuleDestroy {
       /^AUD-(\d+)$/,
     );
     this.partNumberSequence = this.resolveNextSequence(
-      partNumberRows.map((row) => row.partNumber),
+      partRows.map((row) => row.partNumber),
       /^PRT-(\d+)$/,
     );
   }
@@ -869,219 +954,132 @@ export class PartBomStoreService implements OnModuleDestroy {
     return max + 1;
   }
 
-  private getPartsCount(): number {
-    const row = this.db
-      .prepare('SELECT COUNT(*) AS count FROM parts')
-      .get() as {
-      count: number;
+  private rethrowMissingSchemaError(error: unknown): never {
+    const prismaError = error as {
+      code?: string;
+      meta?: { table?: unknown };
     };
-    return row.count;
+
+    if (prismaError.code === 'P2021') {
+      const table =
+        typeof prismaError.meta?.table === 'string'
+          ? prismaError.meta.table
+          : 'required table';
+      throw new Error(
+        `Database schema is not initialized (${table} is missing). Run \`pnpm run prisma:deploy\` in backend and restart the API.`,
+      );
+    }
+
+    throw error;
   }
 
-  private toPart(row: PartRow): Part {
+  private toPart(row: PrismaPartRecord): Part {
     return {
       id: row.id,
-      partNumber: row.part_number,
+      partNumber: row.partNumber,
       name: row.name,
       description: row.description,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
     };
   }
 
-  private seedSampleData(): void {
-    const parts = {
-      root: this.createPart({
-        partNumber: 'PRT-000001',
-        name: 'Autonomous Cart Assembly',
-        description: 'Root product assembly used for startup sample data.',
-      }),
-      mechanical: this.createPart({
-        partNumber: 'PRT-000002',
-        name: 'Mechanical Module',
-      }),
-      electrical: this.createPart({
-        partNumber: 'PRT-000003',
-        name: 'Electrical Module',
-      }),
-      controls: this.createPart({
-        partNumber: 'PRT-000004',
-        name: 'Controls Module',
-      }),
-      basePlate: this.createPart({
-        partNumber: 'PRT-000005',
-        name: 'Base Plate',
-      }),
-      suspension: this.createPart({
-        partNumber: 'PRT-000006',
-        name: 'Suspension Kit',
-      }),
-      wheelSet: this.createPart({
-        partNumber: 'PRT-000007',
-        name: 'Wheel Set',
-      }),
-      harness: this.createPart({
-        partNumber: 'PRT-000008',
-        name: 'Primary Harness',
-      }),
-      batteryPack: this.createPart({
-        partNumber: 'PRT-000009',
-        name: 'Battery Pack',
-      }),
-      safetyRelay: this.createPart({
-        partNumber: 'PRT-000010',
-        name: 'Safety Relay',
-      }),
-      controllerBoard: this.createPart({
-        partNumber: 'PRT-000011',
-        name: 'Controller Board',
-      }),
-      operatorPanel: this.createPart({
-        partNumber: 'PRT-000012',
-        name: 'Operator Panel',
-      }),
-      coolingModule: this.createPart({
-        partNumber: 'PRT-000013',
-        name: 'Cooling Module',
-      }),
-      frontLeftWheel: this.createPart({
-        partNumber: 'PRT-000014',
-        name: 'Front Left Wheel',
-      }),
-      frontRightWheel: this.createPart({
-        partNumber: 'PRT-000015',
-        name: 'Front Right Wheel',
-      }),
-      rearLeftWheel: this.createPart({
-        partNumber: 'PRT-000016',
-        name: 'Rear Left Wheel',
-      }),
-      rearRightWheel: this.createPart({
-        partNumber: 'PRT-000017',
-        name: 'Rear Right Wheel',
-      }),
-      lidar: this.createPart({
-        partNumber: 'PRT-000018',
-        name: 'LiDAR Sensor',
-      }),
-      imu: this.createPart({
-        partNumber: 'PRT-000019',
-        name: 'IMU Sensor',
-      }),
-      cpuModule: this.createPart({
-        partNumber: 'PRT-000020',
-        name: 'CPU Module',
-      }),
-      ioModule: this.createPart({
-        partNumber: 'PRT-000021',
-        name: 'I/O Module',
-      }),
+  private toBomLink(row: PrismaBomLinkRecord): BomLink {
+    return {
+      parentId: row.parentId,
+      childId: row.childId,
+      quantity: row.quantity,
+      createdAt: row.createdAt.toISOString(),
     };
+  }
 
-    this.createBomLink({
-      parentId: parts.root.id,
-      childId: parts.mechanical.id,
-      quantity: 1,
-    });
-    this.createBomLink({
-      parentId: parts.root.id,
-      childId: parts.electrical.id,
-      quantity: 1,
-    });
-    this.createBomLink({
-      parentId: parts.root.id,
-      childId: parts.controls.id,
-      quantity: 1,
-    });
+  private toAuditMetadata(
+    metadata: Prisma.JsonValue | null,
+  ): Record<string, string | number> | undefined {
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      return undefined;
+    }
 
-    this.createBomLink({
-      parentId: parts.mechanical.id,
-      childId: parts.basePlate.id,
-      quantity: 1,
-    });
-    this.createBomLink({
-      parentId: parts.mechanical.id,
-      childId: parts.suspension.id,
-      quantity: 1,
-    });
-    this.createBomLink({
-      parentId: parts.mechanical.id,
-      childId: parts.wheelSet.id,
-      quantity: 1,
-    });
+    const record: Record<string, string | number> = {};
 
-    this.createBomLink({
-      parentId: parts.wheelSet.id,
-      childId: parts.frontLeftWheel.id,
-      quantity: 1,
-    });
-    this.createBomLink({
-      parentId: parts.wheelSet.id,
-      childId: parts.frontRightWheel.id,
-      quantity: 1,
-    });
-    this.createBomLink({
-      parentId: parts.wheelSet.id,
-      childId: parts.rearLeftWheel.id,
-      quantity: 1,
-    });
-    this.createBomLink({
-      parentId: parts.wheelSet.id,
-      childId: parts.rearRightWheel.id,
-      quantity: 1,
-    });
+    for (const [key, value] of Object.entries(
+      metadata as Record<string, Prisma.JsonValue>,
+    )) {
+      if (typeof value === 'string' || typeof value === 'number') {
+        record[key] = value;
+      }
+    }
 
-    this.createBomLink({
-      parentId: parts.electrical.id,
-      childId: parts.harness.id,
-      quantity: 1,
-    });
-    this.createBomLink({
-      parentId: parts.electrical.id,
-      childId: parts.batteryPack.id,
-      quantity: 1,
-    });
-    this.createBomLink({
-      parentId: parts.electrical.id,
-      childId: parts.safetyRelay.id,
-      quantity: 1,
-    });
+    return Object.keys(record).length > 0 ? record : undefined;
+  }
 
-    this.createBomLink({
-      parentId: parts.controls.id,
-      childId: parts.controllerBoard.id,
-      quantity: 1,
-    });
-    this.createBomLink({
-      parentId: parts.controls.id,
-      childId: parts.operatorPanel.id,
-      quantity: 1,
-    });
-    this.createBomLink({
-      parentId: parts.controls.id,
-      childId: parts.coolingModule.id,
-      quantity: 1,
-    });
+  private async seedSampleData(): Promise<void> {
+    const partIdsByKey = new Map<string, string>();
 
-    this.createBomLink({
-      parentId: parts.controllerBoard.id,
-      childId: parts.lidar.id,
-      quantity: 1,
-    });
-    this.createBomLink({
-      parentId: parts.controllerBoard.id,
-      childId: parts.imu.id,
-      quantity: 1,
-    });
-    this.createBomLink({
-      parentId: parts.controllerBoard.id,
-      childId: parts.cpuModule.id,
-      quantity: 1,
-    });
-    this.createBomLink({
-      parentId: parts.controllerBoard.id,
-      childId: parts.ioModule.id,
-      quantity: 1,
-    });
+    for (const partDefinition of SEED_PARTS) {
+      const existingPart = await this.prisma.part.findUnique({
+        where: {
+          partNumber: partDefinition.partNumber,
+        },
+        select: {
+          id: true,
+          partNumber: true,
+        },
+      });
+
+      if (existingPart) {
+        this.updatePartNumberSequence(existingPart.partNumber);
+        partIdsByKey.set(partDefinition.key, existingPart.id);
+        continue;
+      }
+
+      const createdPart = await this.createPart({
+        partNumber: partDefinition.partNumber,
+        name: partDefinition.name,
+        description: partDefinition.description,
+      });
+
+      partIdsByKey.set(partDefinition.key, createdPart.id);
+    }
+
+    for (const linkDefinition of SEED_BOM_LINKS) {
+      const parentId = partIdsByKey.get(linkDefinition.parentKey);
+      const childId = partIdsByKey.get(linkDefinition.childKey);
+
+      if (!parentId || !childId) {
+        throw new Error(
+          `Invalid seed BOM link: ${linkDefinition.parentKey} -> ${linkDefinition.childKey}.`,
+        );
+      }
+
+      const existingLink = await this.prisma.bomLink.findUnique({
+        where: {
+          parentId_childId: {
+            parentId,
+            childId,
+          },
+        },
+        select: {
+          quantity: true,
+        },
+      });
+
+      if (!existingLink) {
+        await this.createBomLink({
+          parentId,
+          childId,
+          quantity: linkDefinition.quantity,
+        });
+        continue;
+      }
+
+      if (existingLink.quantity !== linkDefinition.quantity) {
+        await this.updateBomLink({
+          parentId,
+          childId,
+          quantity: linkDefinition.quantity,
+        });
+      }
+    }
   }
 }
