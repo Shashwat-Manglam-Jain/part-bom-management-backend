@@ -79,6 +79,27 @@ Response:
 }
 ```
 
+## Deploy on Vercel (Backend)
+
+This repository now includes Vercel serverless config:
+- `backend/vercel.json`
+- `backend/api/index.ts`
+
+Steps:
+1. In Vercel, set project **Root Directory** to `backend`.
+2. Add env vars in Vercel project settings:
+   - `DATABASE_URL`
+   - `DIRECT_URL`
+   - `SEED_SAMPLE_DATA` (optional)
+3. Apply schema once from CI/local before first traffic:
+   - `pnpm run prisma:deploy`
+4. Deploy and verify:
+   - `GET https://<your-backend-domain>/health`
+
+Important:
+- Do not rely on `nest start` on Vercel. Vercel runs serverless functions, not a long-running Node server.
+- Frontend must point to your deployed backend domain via `VITE_API_BASE_URL`.
+
 ## API overview
 
 ### Parts
